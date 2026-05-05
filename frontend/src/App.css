@@ -1,0 +1,173 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light dark;
+  color: #1f2937;
+  background: #f8fafc;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.6rem;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+  color: #334155;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  color: #64748b;
+}
+
+.provider-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+  flex-wrap: wrap;
+}
+
+.provider-bar ul {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.provider-bar li {
+  background: #eff6ff;
+  color: #1e40af;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.provider-bar button {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.provider-bar button[disabled] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.converter {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.selectors {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.currency-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9rem;
+}
+
+.currency-selector select {
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  min-width: 140px;
+  font-size: 1rem;
+}
+
+.rate-display .rate-line {
+  font-size: 1.4rem;
+  margin: 0;
+}
+
+.rate-display .rate-provider {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+.rate-error {
+  color: #b91c1c;
+}
+
+.quote-comparison,
+.rates-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.quote-comparison th,
+.quote-comparison td,
+.rates-table th,
+.rates-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  text-align: left;
+}
+
+.quote-comparison th,
+.rates-table th {
+  background: #f8fafc;
+  font-size: 0.85rem;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.quote-comparison .row-best td {
+  background: #ecfdf5;
+  font-weight: 600;
+}
+
+.best-pill {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: #10b981;
+  color: white;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
