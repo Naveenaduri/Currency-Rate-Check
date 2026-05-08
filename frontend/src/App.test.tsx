@@ -13,36 +13,79 @@ const okResponse = (body: unknown, status = 200) =>
     json: () => Promise.resolve(body),
   }) as unknown as Response;
 
-const handlers = (rateBest: { provider: string; rate: number }) =>
-  async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url.endsWith("/api/currencies")) {
-      return okResponse(["USD", "EUR", "GBP"]);
-    }
-    if (url.endsWith("/api/providers")) {
-      return okResponse(["Remitly", "Wise", "Western Union"]);
-    }
-    if (url.endsWith("/api/rates")) {
-      return okResponse([
-        { from: "USD", to: "EUR", rate: rateBest.rate, provider: rateBest.provider },
-      ]);
-    }
-    if (url.endsWith("/api/rates/refresh")) {
-      return okResponse([]);
-    }
-    if (url.endsWith("/quotes")) {
-      return okResponse({
-        from: "USD",
-        to: "EUR",
-        best: rateBest,
-        quotes: [rateBest, { provider: "Remitly", rate: 0.91 }],
-      });
-    }
-    if (url.includes("/api/rates/")) {
-      return okResponse({ from: "USD", to: "EUR", ...rateBest });
-    }
-    return okResponse(undefined, 404);
-  };
+const buildQuote = () => ({
+  from: "USD",
+  to: "INR",
+  sendAmount: 1000,
+  bestReceiveAmount: 94405.0,
+  baselineName: "Chase",
+  lastRefreshAt: "2026-05-08T03:46:25Z",
+  source: "Wise V3 Comparisons API",
+  providers: [
+    {
+      id: "wise",
+      name: "Wise",
+      logoUrl: "https://logos/wise.svg",
+      type: "moneyTransferProvider",
+      rate: 94.5,
+      fee: 2.0,
+      markup: 0,
+      receiveAmount: 94405.0,
+      savingsVsBaseline: 2455.0,
+      deliveryDuration: 1,
+      deliveryDurationType: "hours",
+      dateCollected: "2026-05-08T03:46:25Z",
+      bestDeal: true,
+      baseline: false,
+    },
+    {
+      id: "remitly",
+      name: "Remitly",
+      logoUrl: "https://logos/remitly.svg",
+      type: "moneyTransferProvider",
+      rate: 94.3,
+      fee: 0,
+      markup: 0.27,
+      receiveAmount: 94300.0,
+      savingsVsBaseline: 2350.0,
+      deliveryDuration: null,
+      deliveryDurationType: null,
+      dateCollected: "2026-05-08T03:46:25Z",
+      bestDeal: false,
+      baseline: false,
+    },
+    {
+      id: "chase",
+      name: "Chase",
+      logoUrl: "https://logos/chase.svg",
+      type: "bank",
+      rate: 91.95,
+      fee: 10.0,
+      markup: 3.2,
+      receiveAmount: 91950.0,
+      savingsVsBaseline: 0,
+      deliveryDuration: null,
+      deliveryDurationType: null,
+      dateCollected: "2026-05-08T03:46:25Z",
+      bestDeal: false,
+      baseline: true,
+    },
+  ],
+});
+
+const handlers = async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = String(input);
+  if (url.endsWith("/api/currencies")) {
+    return okResponse(["USD", "EUR", "GBP", "INR"]);
+  }
+  if (url.startsWith("http://localhost:8080/api/quotes/refresh")) {
+    return okResponse(buildQuote());
+  }
+  if (url.startsWith("http://localhost:8080/api/quotes")) {
+    return okResponse(buildQuote());
+  }
+  return okResponse(undefined, 404);
+};
 
 beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
@@ -54,37 +97,42 @@ afterEach(() => {
 });
 
 describe("App", () => {
-  it("renders providers, converter, comparison and rates table", async () => {
-    fetchMock.mockImplementation(handlers({ provider: "Wise", rate: 0.93 }));
+  it("renders the converter and provider cards including best deal", async () => {
+    fetchMock.mockImplementation(handlers);
 
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByLabelText("From")).toBeInTheDocument(),
+      expect(screen.getByLabelText("Send amount")).toBeInTheDocument(),
     );
-    await waitFor(() =>
-      expect(screen.getAllByText("Wise").length).toBeGreaterThan(0),
-    );
-    await waitFor(() =>
-      expect(screen.getByLabelText("Best rates by pair")).toBeInTheDocument(),
-    );
-    expect(
-      await screen.findByLabelText("Provider quote comparison"),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Best via/)).toBeInTheDocument();
+
+    expect(await screen.findByText("Wise")).toBeInTheDocument();
+    expect(await screen.findByText("Best Deal")).toBeInTheDocument();
+    expect(screen.getByText("Remitly")).toBeInTheDocument();
+    expect(screen.getByText("Chase")).toBeInTheDocument();
+    expect(screen.getByText(/3 Providers compared/i)).toBeInTheDocument();
+    expect(screen.getByText(/Standard Rate/i)).toBeInTheDocument();
   });
 
-  it("clicking refresh calls /api/rates/refresh and re-fetches", async () => {
-    fetchMock.mockImplementation(handlers({ provider: "Remitly", rate: 0.92 }));
+  it("computes the receive total from the top provider quote", async () => {
+    fetchMock.mockImplementation(handlers);
 
     render(<App />);
 
+    const output = await screen.findByLabelText("Estimated receive amount");
     await waitFor(() =>
-      expect(screen.getByLabelText("From")).toBeInTheDocument(),
+      expect(output.textContent ?? "").toMatch(/94,405\.00/),
     );
+  });
 
+  it("clicking refresh calls /api/quotes/refresh and re-fetches", async () => {
+    fetchMock.mockImplementation(handlers);
+
+    render(<App />);
+
+    await screen.findByText("Wise");
     fetchMock.mockClear();
-    fetchMock.mockImplementation(handlers({ provider: "Wise", rate: 0.94 }));
+    fetchMock.mockImplementation(handlers);
 
     await userEvent.click(
       screen.getByRole("button", { name: /Refresh quotes/i }),
@@ -92,11 +140,7 @@ describe("App", () => {
 
     await waitFor(() => {
       const calls = fetchMock.mock.calls.map((c: unknown[]) => String(c[0]));
-      expect(calls).toEqual(
-        expect.arrayContaining([
-          "http://localhost:8080/api/rates/refresh",
-        ]),
-      );
+      expect(calls.some((u) => u.includes("/api/quotes/refresh"))).toBe(true);
     });
   });
 });

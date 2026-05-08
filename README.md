@@ -1,122 +1,160 @@
-# Currency Exchange Rate App
+# Remittance comparison app
 
-Polls multiple remittance providers, caches their quotes in memory, and exposes the **best direct rate** (and the per-provider breakdown) for any `from -> to` currency pair. The React frontend auto-renders the best rate, the underlying provider, and a comparison panel against the other providers as the user changes currencies.
-
-## Repository layout
-
-```
-Remitly/
-  backend/      Spring Boot 3 + Java 17 (Maven, JaCoCo)
-  frontend/     React 18 + TypeScript (Vite, Vitest)
-  README.md
-```
-
-## Architecture
+A small full-stack app that **pulls live, real, multi-provider remittance quotes
+from the public Wise V3 Comparisons API** and renders the comparison UI you
+expect from sites like Monito or Wise's own "compare" page. No hardcoded
+provider data, no auth keys.
 
 ```
-+-----------------------------+
-|   ExchangeRateProvider[]    |  <-- one bean per provider
-+--------------+--------------+
-               |
-        @Scheduled poll                    +--------------------------+
-               v                           |     web layer            |
-+-----------------------------+   uses     |  CurrencyController      |
-|       RateAggregator        +----------> |  RateController          |
-|  Map<provider, Map<pair,    |            |  ProviderController      |
-|       BigDecimal>>          |            +--------------------------+
-+-----------------------------+
+React + Vite (frontend)  ──►  Spring Boot 3 / Java 17 (backend)
+                                            │
+                                            ▼
+                          https://api.wise.com/v3/comparisons/
+                          (public, no auth, ~9 providers per pair)
 ```
 
-- **`ExchangeRateProvider`** is the integration point. Each provider supplies its own `fetchRates()` snapshot.
-- Two reference implementations ship in the box:
-  - **`SimulatedProvider`** – three beans (`Remitly`, `Wise`, `Western Union`), each with a different spread and small per-poll jitter so prices visibly move. This is what runs by default, so the app is fully self-contained.
-  - **`HttpExchangeRateProvider`** – generic Frankfurter-compatible client (`GET /latest?from={base}` → `{ "rates": { ... } }`). Off by default; flip `fx.providers.frankfurter.enabled=true` to add it as a fourth provider.
-- **`RateAggregator`** runs on `@PostConstruct` and again every `fx.poll.interval-ms` (default 30 s). It calls every provider, replaces that provider's cached snapshot on success, and **keeps the previous snapshot on failure** so a flaky provider doesn't drop the whole feed.
-- "Best" for `from -> to` = the highest rate across providers (customer receives the most destination currency per unit of source).
+## How rates are sourced
 
-Direct conversion only — there is no transitive path computation, by design.
+Wise publishes a public comparison endpoint at
+`https://api.wise.com/v3/comparisons/?sourceCurrency=USD&targetCurrency=INR&sendAmount=1000`
+that returns competitor quotes (Remitly, Xoom, MoneyGram, Instarem, OFX, plus
+banks like Chase, Wells Fargo, State Bank of India, etc.) with **real rates,
+fees, logos, and collection timestamps**. The backend wraps that with a small
+TTL cache (default 5 min) so we don't hammer Wise on every keystroke.
 
-## Running
+For each user-entered amount we keep the cached rate + fee per corridor and
+recompute `receiveAmount = (sendAmount - fee) × rate` instantaneously, picking
+the worst bank (or worst-receiving provider, if no bank is in the result) as
+the "Standard rate" baseline that "You save … vs ___" is computed against.
 
-### Prerequisites
-- JDK 17+ (tested under Java 21)
-- Node.js 18+ and npm 9+
-- Internet access on first run so the bundled Maven wrapper can fetch Maven 3.9.6
+## Project layout
+
+```
+backend/   Spring Boot 3 service (Java 17, Maven, JaCoCo)
+frontend/  React 18 + TypeScript + Vite (Vitest, React Testing Library)
+```
+
+## Running locally
 
 ### Backend (port 8080)
 
-```
+```bash
 cd backend
-.\mvnw.cmd spring-boot:run        # Windows
-./mvnw spring-boot:run            # macOS / Linux
+./mvnw spring-boot:run        # macOS/Linux
+.\mvnw.cmd spring-boot:run    # Windows PowerShell
 ```
 
-You should see `Started FxApplication` followed by silent `RateAggregator` polls every 30 s.
+The backend lazy-loads on the first `/api/quotes` request — no warm-up needed.
 
 ### Frontend (port 5173)
 
-```
+```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-Open <http://localhost:5173>. The frontend uses `http://localhost:8080` for the API by default; override via `VITE_API_BASE_URL` in a `.env.local`.
+Open <http://localhost:5173>. The frontend talks to `http://localhost:8080`
+by default; override with `VITE_API_BASE_URL` in a `.env.local`.
 
-## API contract
+## REST API
 
-| Method | Path | Result |
-|--------|------|--------|
-| GET | `/api/providers` | `["Remitly","Wise","Western Union"]` |
-| GET | `/api/currencies` | Sorted union of currencies seen across all provider snapshots |
-| GET | `/api/rates` | Best `RateQuote` per pair: `[{ "from","to","rate","provider" }, ...]` |
-| GET | `/api/rates/{from}/{to}` | Best `RateQuote` for the pair, or 404 if no provider quotes it |
-| GET | `/api/rates/{from}/{to}/quotes` | `RateComparison` — `{ "from","to","best": {...}, "quotes": [{provider,rate}, ...] }` sorted desc, or 404 if no quotes |
-| POST | `/api/rates/refresh` | Triggers an immediate re-poll of every provider, then returns the new best rates |
+| Method & path                                 | Purpose                                       |
+| --------------------------------------------- | --------------------------------------------- |
+| `GET  /api/currencies`                        | Configured currency dropdown list             |
+| `GET  /api/providers`                         | Names of providers seen in cached corridors   |
+| `GET  /api/quotes?from=USD&to=INR&amount=1000`| **Full comparison response for the UI**       |
+| `POST /api/quotes/refresh?from=...&to=...&amount=...` | Force a cache miss and refetch        |
 
-Errors come back as `{ "error": "...", "status": <code> }`.
+Sample `GET /api/quotes` response:
 
-## Configuration
-
-`backend/src/main/resources/application.properties`:
-
-```properties
-# How often the aggregator polls every registered provider.
-fx.poll.interval-ms=30000
-
-# Frankfurter HTTP provider is opt-in (requires internet at runtime).
-fx.providers.frankfurter.enabled=false
-fx.providers.frankfurter.base-url=https://api.frankfurter.app
-fx.providers.frankfurter.currencies=USD,EUR,GBP,JPY,INR
+```json
+{
+  "from": "USD",
+  "to": "INR",
+  "sendAmount": 1000.00,
+  "bestReceiveAmount": 94447.34,
+  "baselineName": "Chase (US)",
+  "lastRefreshAt": "2026-05-08T04:56:21Z",
+  "source": "Wise V3 Comparisons API",
+  "providers": [
+    {
+      "id": "remitly",
+      "name": "Remitly",
+      "logoUrl": "https://dq8dwmysp7hk1.cloudfront.net/logos/remitly.svg",
+      "type": "moneyTransferProvider",
+      "rate": 94.447340,
+      "fee": 0.00,
+      "markup": 0.116,
+      "receiveAmount": 94447.34,
+      "savingsVsBaseline": 3190.67,
+      "dateCollected": "2026-05-08T04:48:05Z",
+      "bestDeal": true,
+      "baseline": false
+    }
+    /* ... 8 more providers ... */
+  ]
+}
 ```
 
-To plug in a real provider, implement `ExchangeRateProvider` and register it as a Spring `@Bean` (see `config/ProviderConfig.java`). The aggregator picks it up automatically.
+## Configuration knobs
 
-## Tests and coverage
+Edit `backend/src/main/resources/application.properties` (or pass `-D` flags):
 
-### Backend (JaCoCo, 85% line bundle threshold)
+| Property                                | Default                                    | Effect |
+| --------------------------------------- | ------------------------------------------ | ------ |
+| `fx.wise.base-url`                      | `https://api.wise.com`                     | Override for proxies / test stubs |
+| `fx.wise.connect-timeout-ms`            | `5000`                                     | Connect timeout to Wise |
+| `fx.wise.read-timeout-ms`               | `8000`                                     | Read timeout for Wise responses |
+| `fx.cache.sample-amount`                | `1000`                                     | Send amount used when warming the cache |
+| `fx.cache.ttl-seconds`                  | `300`                                      | TTL before a corridor is re-fetched |
+| `fx.currencies.supported`               | `USD,EUR,GBP,JPY,INR,MXN,PHP,AUD,CAD,SGD,CHF` | Currencies shown in the picker |
+| `fx.cors.allowed-origin-patterns`       | `http://localhost:*,http://127.0.0.1:*`    | CORS origin patterns |
 
-```
+## Testing
+
+### Backend
+
+```bash
 cd backend
-.\mvnw.cmd verify
+./mvnw verify
 ```
 
-`verify` runs unit tests (provider, aggregator, service, exception handler), `@WebMvcTest` slices for each controller, and a full `@SpringBootTest` smoke that exercises the live aggregator with the simulated providers. The HTML report is at `backend/target/site/jacoco/index.html`.
+JaCoCo enforces ≥ 85 % line coverage; the build fails otherwise. Reports
+land in `backend/target/site/jacoco/index.html`.
 
-### Frontend (Vitest + V8 coverage, 85% / 80% thresholds)
+### Frontend
 
-```
+```bash
 cd frontend
-npm test          # 37 tests, single run
-npm run coverage  # tests + coverage thresholds
+npm run test          # one-shot
+npm run coverage      # with v8 coverage report (≥ 85 % statements + branches)
 ```
 
-Latest run: 99% statements, 88% branches, 100% functions. HTML report at `frontend/coverage/index.html`.
+## Architecture notes
 
-## What's intentionally out of scope
+- `WiseComparisonClient` is the single network seam. It speaks the Wise V3
+  Comparisons API directly — no model translation in between, just JSON →
+  records.
+- `RateAggregator` keeps an in-memory `ConcurrentHashMap<CurrencyPair,
+  CachedComparison>` with a TTL. Concurrent callers for the same corridor
+  funnel through `Map.compute`, so we never fan out duplicate requests for the
+  same pair.
+- If a Wise refresh fails *after* we already have a cached snapshot, the
+  aggregator serves stale data instead of throwing — so a transient outage
+  doesn't break the UI.
+- The frontend debounces send-amount edits (300 ms) and uses
+  `AbortController` to cancel stale in-flight requests, so editing the
+  amount stays smooth.
+- The `ProviderCard` falls back to a name-initial avatar if a provider's
+  CDN-hosted logo fails to load.
 
-- No graph traversal / transitive path computation.
-- No automatic inverse-rate computation; `A->B` does not imply `B->A` unless a provider quotes it.
-- No persistence beyond process lifetime; restart re-polls.
-- No authentication.
-- Currency add/remove endpoints are gone — currencies are derived from whatever the providers currently quote.
+## Caveats
+
+- Wise's V3 endpoint is documented as deprecated; if/when they shut it off,
+  swap the base URL to `/v4/` and add Basic Auth via Wise's affiliate program.
+  The `WiseComparisonClient` interface stays the same.
+- Rates and fees come straight from Wise's collection pipeline and are
+  refreshed by Wise on their own cadence (per-provider `dateCollected`
+  timestamps appear in the UI's debug payload). They are intended for
+  comparison, not as committed live execution rates.

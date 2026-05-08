@@ -1,107 +1,96 @@
 package com.remitly.fx.service;
 
-import com.remitly.fx.model.CurrencyPair;
-import com.remitly.fx.model.RateComparison;
-import com.remitly.fx.model.RateQuote;
-import com.remitly.fx.provider.ExchangeRateProvider;
+import com.remitly.fx.model.QuoteResponse;
+import com.remitly.fx.wise.WiseComparisonClient;
+import com.remitly.fx.wise.WiseComparisonResponse;
+import com.remitly.fx.wise.WiseComparisonResponse.DeliveryEstimation;
+import com.remitly.fx.wise.WiseComparisonResponse.Provider;
+import com.remitly.fx.wise.WiseComparisonResponse.Quote;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.RestClient;
 
 import java.math.BigDecimal;
-import java.util.HashMap;
+import java.time.Instant;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ExchangeRateServiceTest {
 
-    private static class FakeProvider implements ExchangeRateProvider {
-        private final String name;
-        private final Map<CurrencyPair, BigDecimal> rates;
-        FakeProvider(String name, Map<CurrencyPair, BigDecimal> rates) {
-            this.name = name;
-            this.rates = rates;
-        }
-        @Override public String getName() { return name; }
-        @Override public Map<CurrencyPair, BigDecimal> fetchRates() {
-            return new HashMap<>(rates);
+    private static class StubClient extends WiseComparisonClient {
+        WiseComparisonResponse next;
+        final AtomicInteger calls = new AtomicInteger();
+        StubClient() { super("https://example", RestClient.create()); }
+        @Override
+        public WiseComparisonResponse fetchComparison(String src, String dst, BigDecimal amt) {
+            calls.incrementAndGet();
+            return next;
         }
     }
 
-    private ExchangeRateService serviceWith(ExchangeRateProvider... providers) {
-        RateAggregator aggregator = new RateAggregator(List.of(providers));
-        aggregator.init();
-        return new ExchangeRateService(aggregator);
+    private static Provider provider(String alias, String name, String type) {
+        Quote q = new Quote(
+                new BigDecimal("94.30"),
+                new BigDecimal("2"),
+                BigDecimal.ZERO,
+                new BigDecimal("94300"),
+                Instant.parse("2026-05-08T00:00:00Z"),
+                "US", "IN",
+                new DeliveryEstimation(null, null, null, true));
+        return new Provider(1, alias, name, "https://logos/" + alias + ".svg",
+                type, false, List.of(q));
+    }
+
+    private ExchangeRateService serviceWith(StubClient client) {
+        RateAggregator aggregator = new RateAggregator(client, new BigDecimal("1000"), 300);
+        return new ExchangeRateService(aggregator,
+                new String[]{"USD", "EUR", "GBP", "INR"});
     }
 
     @Test
-    void getBestRateDelegatesToAggregator() {
-        ExchangeRateService service = serviceWith(
-                new FakeProvider("A", Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.91"))),
-                new FakeProvider("B", Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.93")))
-        );
-
-        RateQuote best = service.getBestRate("USD", "EUR");
-
-        assertThat(best.provider()).isEqualTo("B");
-        assertThat(best.rate()).isEqualByComparingTo("0.93");
+    void listCurrenciesReturnsConfiguredSet() {
+        ExchangeRateService service = serviceWith(new StubClient());
+        assertThat(service.listCurrencies()).containsExactly("EUR", "GBP", "INR", "USD");
     }
 
     @Test
-    void getBestRateThrows404WhenMissing() {
-        ExchangeRateService service = serviceWith(
-                new FakeProvider("A", Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.91")))
-        );
+    void quoteDelegatesToAggregator() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("wise", "Wise", "moneyTransferProvider")));
+        ExchangeRateService service = serviceWith(client);
 
-        assertThatThrownBy(() -> service.getBestRate("USD", "JPY"))
-                .isInstanceOf(RateNotFoundException.class)
-                .hasMessageContaining("USD -> JPY");
+        QuoteResponse response = service.quote("USD", "INR", new BigDecimal("1000"));
+
+        assertThat(response.providers()).hasSize(1);
+        assertThat(response.providers().get(0).id()).isEqualTo("wise");
     }
 
     @Test
-    void compareReturnsAllProviderQuotes() {
-        ExchangeRateService service = serviceWith(
-                new FakeProvider("A", Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.90"))),
-                new FakeProvider("B", Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.93")))
-        );
+    void refreshInvalidatesCache() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("wise", "Wise", "moneyTransferProvider")));
+        ExchangeRateService service = serviceWith(client);
 
-        RateComparison comparison = service.compare("USD", "EUR");
+        service.quote("USD", "INR", new BigDecimal("1000"));
+        service.refresh("USD", "INR");
+        service.quote("USD", "INR", new BigDecimal("1000"));
 
-        assertThat(comparison.quotes()).hasSize(2);
-        assertThat(comparison.best().provider()).isEqualTo("B");
+        assertThat(client.calls.get()).isEqualTo(2);
     }
 
     @Test
-    void compareThrowsWhenNoQuotes() {
-        ExchangeRateService service = serviceWith(
-                new FakeProvider("A", Map.of())
-        );
+    void listProvidersDerivesFromAggregator() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("wise", "Wise", "moneyTransferProvider"),
+                provider("remitly", "Remitly", "moneyTransferProvider")));
+        ExchangeRateService service = serviceWith(client);
 
-        assertThatThrownBy(() -> service.compare("USD", "EUR"))
-                .isInstanceOf(RateNotFoundException.class);
-    }
-
-    @Test
-    void listProvidersAndCurrenciesAndBestRatesAndRefresh() {
-        ExchangeRateService service = serviceWith(
-                new FakeProvider("A", Map.of(
-                        new CurrencyPair("USD", "EUR"), new BigDecimal("0.91"),
-                        new CurrencyPair("USD", "GBP"), new BigDecimal("0.79")
-                )),
-                new FakeProvider("B", Map.of(
-                        new CurrencyPair("USD", "EUR"), new BigDecimal("0.93")
-                ))
-        );
-
-        assertThat(service.listProviders()).containsExactly("A", "B");
-        assertThat(service.listCurrencies()).containsExactly("EUR", "GBP", "USD");
-        assertThat(service.listBestRates()).extracting("from", "to", "provider")
-                .containsExactlyInAnyOrder(
-                        org.assertj.core.groups.Tuple.tuple("USD", "EUR", "B"),
-                        org.assertj.core.groups.Tuple.tuple("USD", "GBP", "A"));
-
-        service.refreshNow();
-        assertThat(service.listBestRates()).hasSize(2);
+        assertThat(service.listProviders()).isEmpty();
+        service.quote("USD", "INR", new BigDecimal("1000"));
+        assertThat(service.listProviders()).contains("Wise", "Remitly");
     }
 }

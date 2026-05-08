@@ -1,12 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
-  getBestRate,
   getCurrencies,
-  getProviders,
-  getQuotes,
-  getRates,
-  refreshRates,
+  getQuote,
+  refreshQuote,
 } from "./client";
 
 const mockResponse = (
@@ -49,90 +46,62 @@ describe("api client", () => {
     );
   });
 
-  it("getProviders hits /api/providers", async () => {
-    fetchMock.mockResolvedValueOnce(mockResponse(["Remitly", "Wise"]));
+  it("getQuote hits /api/quotes with from/to/amount", async () => {
+    const payload = {
+      from: "USD",
+      to: "INR",
+      sendAmount: 1000,
+      bestReceiveAmount: 94300.0,
+      baselineName: "Chase",
+      lastRefreshAt: "2026-05-08T03:46:25Z",
+      source: "Wise V3 Comparisons API",
+      providers: [],
+    };
+    fetchMock.mockResolvedValueOnce(mockResponse(payload));
 
-    const result = await getProviders();
+    const result = await getQuote("USD", "INR", 1000);
 
-    expect(result).toEqual(["Remitly", "Wise"]);
+    expect(result.bestReceiveAmount).toBe(94300.0);
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8080/api/providers",
+      "http://localhost:8080/api/quotes?from=USD&to=INR&amount=1000",
       expect.any(Object),
     );
   });
 
-  it("getRates returns RateQuote[]", async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockResponse([{ from: "USD", to: "EUR", rate: 0.92, provider: "Remitly" }]),
-    );
-
-    const result = await getRates();
-
-    expect(result).toHaveLength(1);
-    expect(result[0].provider).toBe("Remitly");
-  });
-
-  it("getBestRate returns the best quote", async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockResponse({ from: "USD", to: "EUR", rate: 0.93, provider: "Wise" }),
-    );
-
-    const rate = await getBestRate("USD", "EUR");
-
-    expect(rate.provider).toBe("Wise");
-    expect(rate.rate).toBe(0.93);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8080/api/rates/USD/EUR",
-      expect.any(Object),
-    );
-  });
-
-  it("getQuotes returns the comparison payload", async () => {
+  it("refreshQuote POSTs to /api/quotes/refresh", async () => {
     fetchMock.mockResolvedValueOnce(
       mockResponse({
         from: "USD",
-        to: "EUR",
-        best: { provider: "Wise", rate: 0.93 },
-        quotes: [
-          { provider: "Wise", rate: 0.93 },
-          { provider: "Remitly", rate: 0.92 },
-        ],
+        to: "INR",
+        sendAmount: 1000,
+        bestReceiveAmount: 0,
+        baselineName: "",
+        lastRefreshAt: null,
+        source: "Wise",
+        providers: [],
       }),
     );
 
-    const comparison = await getQuotes("USD", "EUR");
-
-    expect(comparison.best?.provider).toBe("Wise");
-    expect(comparison.quotes).toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8080/api/rates/USD/EUR/quotes",
-      expect.any(Object),
-    );
-  });
-
-  it("refreshRates POSTs to /api/rates/refresh", async () => {
-    fetchMock.mockResolvedValueOnce(mockResponse([]));
-
-    await refreshRates();
+    await refreshQuote("USD", "INR", 1000);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8080/api/rates/refresh",
+      "http://localhost:8080/api/quotes/refresh?from=USD&to=INR&amount=1000",
       expect.objectContaining({ method: "POST" }),
     );
   });
 
-  it("getBestRate maps 404 to ApiError with backend message", async () => {
+  it("getQuote maps 404 to ApiError with backend message", async () => {
     fetchMock.mockResolvedValueOnce(
       mockResponse(
-        { error: "No provider quotes a direct rate for USD -> XYZ", status: 404 },
+        { error: "Wise has no comparison data for USD -> XYZ", status: 404 },
         { status: 404 },
       ),
     );
 
-    await expect(getBestRate("USD", "XYZ")).rejects.toMatchObject({
+    await expect(getQuote("USD", "XYZ", 100)).rejects.toMatchObject({
       name: "ApiError",
       status: 404,
-      message: "No provider quotes a direct rate for USD -> XYZ",
+      message: "Wise has no comparison data for USD -> XYZ",
     });
   });
 
@@ -141,10 +110,10 @@ describe("api client", () => {
       mockResponse(undefined, { status: 404, jsonError: true }),
     );
 
-    const err = await getBestRate("USD", "EUR").catch((e) => e);
+    const err = await getQuote("USD", "EUR", 100).catch((e: Error) => e);
 
     expect(err).toBeInstanceOf(ApiError);
-    expect(err.message).toBe("Not Found");
-    expect(err.status).toBe(404);
+    expect((err as ApiError).message).toBe("Not Found");
+    expect((err as ApiError).status).toBe(404);
   });
 });

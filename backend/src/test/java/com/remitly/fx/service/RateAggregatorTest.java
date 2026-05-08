@@ -1,192 +1,191 @@
 package com.remitly.fx.service;
 
-import com.remitly.fx.model.CurrencyPair;
-import com.remitly.fx.model.RateComparison;
-import com.remitly.fx.model.RateQuote;
-import com.remitly.fx.provider.ExchangeRateProvider;
+import com.remitly.fx.model.ProviderQuote;
+import com.remitly.fx.model.QuoteResponse;
+import com.remitly.fx.wise.WiseComparisonClient;
+import com.remitly.fx.wise.WiseComparisonResponse;
+import com.remitly.fx.wise.WiseComparisonResponse.DeliveryEstimation;
+import com.remitly.fx.wise.WiseComparisonResponse.Provider;
+import com.remitly.fx.wise.WiseComparisonResponse.Quote;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
-import java.util.HashMap;
+import java.time.Instant;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class RateAggregatorTest {
 
-    private static class FakeProvider implements ExchangeRateProvider {
-        private final String name;
-        private Map<CurrencyPair, BigDecimal> rates;
-        private boolean fail = false;
-        private int callCount = 0;
-
-        FakeProvider(String name, Map<CurrencyPair, BigDecimal> rates) {
-            this.name = name;
-            this.rates = new HashMap<>(rates);
-        }
-
+    private static class StubClient extends WiseComparisonClient {
+        WiseComparisonResponse next;
+        RuntimeException toThrow;
+        final AtomicInteger calls = new AtomicInteger();
+        StubClient() { super("https://example", RestClient.create()); }
         @Override
-        public String getName() {
-            return name;
-        }
-
-        @Override
-        public Map<CurrencyPair, BigDecimal> fetchRates() {
-            callCount++;
-            if (fail) throw new RuntimeException("upstream down");
-            return new HashMap<>(rates);
+        public WiseComparisonResponse fetchComparison(String src, String dst, BigDecimal amt) {
+            calls.incrementAndGet();
+            if (toThrow != null) throw toThrow;
+            return next;
         }
     }
 
-    private RateAggregator aggregatorWith(ExchangeRateProvider... providers) {
-        RateAggregator aggregator = new RateAggregator(List.of(providers));
-        aggregator.init();
-        return aggregator;
+    private static Provider provider(String alias, String name, String type,
+                                     String rate, String fee) {
+        Quote q = new Quote(
+                new BigDecimal(rate),
+                new BigDecimal(fee),
+                BigDecimal.ZERO,
+                new BigDecimal(rate).multiply(new BigDecimal("1000")),
+                Instant.parse("2026-05-08T00:00:00Z"),
+                "US", "IN",
+                new DeliveryEstimation(null, null, null, true));
+        return new Provider(1, alias, name, "https://logos/" + alias + ".svg",
+                type, false, List.of(q));
+    }
+
+    private RateAggregator aggregatorWith(StubClient client) {
+        return new RateAggregator(client, new BigDecimal("1000"), 300);
     }
 
     @Test
-    void initPollsEveryProviderAndStampsRefreshTime() {
-        FakeProvider a = new FakeProvider("A",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.92")));
-        FakeProvider b = new FakeProvider("B",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.93")));
-
-        RateAggregator aggregator = aggregatorWith(a, b);
-
-        assertThat(aggregator.providerNames()).containsExactly("A", "B");
-        assertThat(a.callCount).isEqualTo(1);
-        assertThat(b.callCount).isEqualTo(1);
-        assertThat(aggregator.lastRefreshAt()).isNotNull();
-    }
-
-    @Test
-    void bestRatePicksHighest() {
-        FakeProvider a = new FakeProvider("A",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.90")));
-        FakeProvider b = new FakeProvider("B",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.93")));
-        FakeProvider c = new FakeProvider("C",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.91")));
-
-        RateAggregator aggregator = aggregatorWith(a, b, c);
-
-        Optional<RateQuote> best = aggregator.bestRate("usd", "eur");
-
-        assertThat(best).isPresent();
-        assertThat(best.get().provider()).isEqualTo("B");
-        assertThat(best.get().rate()).isEqualByComparingTo("0.93");
-    }
-
-    @Test
-    void bestRateEmptyWhenNoProviderQuotesPair() {
-        FakeProvider only = new FakeProvider("Only",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.92")));
-
-        RateAggregator aggregator = aggregatorWith(only);
-
-        assertThat(aggregator.bestRate("USD", "JPY")).isEmpty();
-    }
-
-    @Test
-    void compareSortsQuotesDescByRateAndExposesBest() {
-        FakeProvider a = new FakeProvider("A",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.90")));
-        FakeProvider b = new FakeProvider("B",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.93")));
-        FakeProvider c = new FakeProvider("C", Map.of());
-
-        RateAggregator aggregator = aggregatorWith(a, b, c);
-
-        RateComparison comp = aggregator.compare("USD", "EUR");
-
-        assertThat(comp.from()).isEqualTo("USD");
-        assertThat(comp.quotes()).extracting("provider").containsExactly("B", "A");
-        assertThat(comp.best().provider()).isEqualTo("B");
-    }
-
-    @Test
-    void allBestRatesUnionsPairsAcrossProviders() {
-        FakeProvider a = new FakeProvider("A", Map.of(
-                new CurrencyPair("USD", "EUR"), new BigDecimal("0.92"),
-                new CurrencyPair("USD", "GBP"), new BigDecimal("0.79")
+    void quoteRecomputesReceiveAmountFromCachedRate() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("remitly", "Remitly", "moneyTransferProvider", "94.30", "0"),
+                provider("wise", "Wise", "moneyTransferProvider", "94.50", "2"),
+                provider("chase", "Chase", "bank", "92.00", "10")
         ));
-        FakeProvider b = new FakeProvider("B", Map.of(
-                new CurrencyPair("USD", "EUR"), new BigDecimal("0.93"),
-                new CurrencyPair("USD", "JPY"), new BigDecimal("156.0")
-        ));
+        RateAggregator aggregator = aggregatorWith(client);
 
-        RateAggregator aggregator = aggregatorWith(a, b);
+        QuoteResponse response = aggregator.quote("USD", "INR", new BigDecimal("500"));
 
-        List<RateQuote> all = aggregator.allBestRates();
-
-        assertThat(all).hasSize(3);
-        assertThat(all)
-                .filteredOn(q -> q.from().equals("USD") && q.to().equals("EUR"))
-                .first()
-                .extracting(RateQuote::provider)
-                .isEqualTo("B");
+        assertThat(response.providers()).hasSize(3);
+        ProviderQuote best = response.providers().get(0);
+        // At a $500 send, Remitly (rate 94.30, fee 0) edges out Wise (94.50, fee 2)
+        // because the flat fee dominates the rate gap on small amounts:
+        //   Remitly = (500 - 0) * 94.30 = 47150.00
+        //   Wise    = (500 - 2) * 94.50 = 47061.00
+        assertThat(best.id()).isEqualTo("remitly");
+        assertThat(best.bestDeal()).isTrue();
+        assertThat(best.receiveAmount()).isEqualByComparingTo("47150.00");
+        assertThat(response.baselineName()).isEqualTo("Chase");
+        assertThat(response.source()).contains("Wise");
     }
 
     @Test
-    void listCurrenciesUnionsAcrossProviders() {
-        FakeProvider a = new FakeProvider("A", Map.of(
-                new CurrencyPair("USD", "EUR"), new BigDecimal("0.92")
+    void cacheReusesPriorResponseWithinTtl() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("remitly", "Remitly", "moneyTransferProvider", "94.30", "0")
         ));
-        FakeProvider b = new FakeProvider("B", Map.of(
-                new CurrencyPair("GBP", "JPY"), new BigDecimal("198.5")
-        ));
+        RateAggregator aggregator = aggregatorWith(client);
 
-        RateAggregator aggregator = aggregatorWith(a, b);
+        aggregator.quote("USD", "INR", new BigDecimal("1000"));
+        aggregator.quote("USD", "INR", new BigDecimal("2000"));
+        aggregator.quote("USD", "INR", new BigDecimal("500"));
 
-        assertThat(aggregator.listCurrencies())
-                .containsExactly("EUR", "GBP", "JPY", "USD");
+        assertThat(client.calls.get()).isEqualTo(1);
     }
 
     @Test
-    void providerFailureKeepsLastSnapshot() {
-        FakeProvider a = new FakeProvider("A",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.92")));
-
-        RateAggregator aggregator = aggregatorWith(a);
-        assertThat(aggregator.bestRate("USD", "EUR")).isPresent();
-
-        a.fail = true;
-        aggregator.refresh();
-
-        assertThat(aggregator.bestRate("USD", "EUR"))
-                .isPresent()
-                .get()
-                .extracting(RateQuote::rate)
-                .isEqualTo(new BigDecimal("0.92"));
-    }
-
-    @Test
-    void snapshotByProviderReturnsSortedQuotesPerProvider() {
-        FakeProvider a = new FakeProvider("A", Map.of(
-                new CurrencyPair("USD", "EUR"), new BigDecimal("0.92"),
-                new CurrencyPair("USD", "GBP"), new BigDecimal("0.79")
+    void invalidateForcesRefetch() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("remitly", "Remitly", "moneyTransferProvider", "94.30", "0")
         ));
+        RateAggregator aggregator = aggregatorWith(client);
 
-        RateAggregator aggregator = aggregatorWith(a);
+        aggregator.quote("USD", "INR", new BigDecimal("1000"));
+        aggregator.invalidate("USD", "INR");
+        aggregator.quote("USD", "INR", new BigDecimal("1000"));
 
-        Map<String, List<RateQuote>> byProvider = aggregator.snapshotByProvider();
-
-        assertThat(byProvider).containsOnlyKeys("A");
-        assertThat(byProvider.get("A")).extracting(RateQuote::to).containsExactly("EUR", "GBP");
+        assertThat(client.calls.get()).isEqualTo(2);
     }
 
     @Test
-    void clearCacheForTestEmptiesEverything() {
-        FakeProvider a = new FakeProvider("A",
-                Map.of(new CurrencyPair("USD", "EUR"), new BigDecimal("0.92")));
-        RateAggregator aggregator = aggregatorWith(a);
+    void rejectsNonPositiveAmount() {
+        RateAggregator aggregator = aggregatorWith(new StubClient());
 
-        aggregator.clearCacheForTest();
+        assertThatThrownBy(() -> aggregator.quote("USD", "INR", BigDecimal.ZERO))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> aggregator.quote("USD", "INR", null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 
-        assertThat(aggregator.allBestRates()).isEmpty();
-        assertThat(aggregator.lastRefreshAt()).isNull();
-        assertThat(aggregator.snapshotEntries().count()).isZero();
+    @Test
+    void wiseFailureWithNoCacheThrowsRateNotFound() {
+        StubClient client = new StubClient();
+        client.toThrow = new RestClientException("network down");
+        RateAggregator aggregator = aggregatorWith(client);
+
+        assertThatThrownBy(() -> aggregator.quote("USD", "INR", new BigDecimal("100")))
+                .isInstanceOf(RateNotFoundException.class);
+    }
+
+    @Test
+    void wiseFailureWithCacheServesStale() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("remitly", "Remitly", "moneyTransferProvider", "94.30", "0")
+        ));
+        RateAggregator aggregator = aggregatorWith(client);
+        aggregator.quote("USD", "INR", new BigDecimal("1000"));
+
+        client.toThrow = new RestClientException("network down");
+        aggregator.invalidate("USD", "INR");
+        // The next call will try to refetch (and fail), but compute() returns the
+        // current value when fresh; here we have no current after invalidate, so a
+        // second invocation that finds a stale entry is what we want.
+        // Re-prime cache, then go stale-by-zero-ttl path indirectly with a short TTL.
+        RateAggregator shortTtl = new RateAggregator(client, new BigDecimal("1000"), 0);
+        client.toThrow = null;
+        shortTtl.quote("USD", "INR", new BigDecimal("1000"));
+        client.toThrow = new RestClientException("down");
+        QuoteResponse stale = shortTtl.quote("USD", "INR", new BigDecimal("1000"));
+
+        assertThat(stale.providers()).isNotEmpty();
+    }
+
+    @Test
+    void emptyResponseTriggers404() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of());
+        RateAggregator aggregator = aggregatorWith(client);
+
+        assertThatThrownBy(() -> aggregator.quote("USD", "XYZ", new BigDecimal("100")))
+                .isInstanceOf(RateNotFoundException.class);
+    }
+
+    @Test
+    void knownProviderNamesAccumulatesAcrossPairs() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("remitly", "Remitly", "moneyTransferProvider", "94.30", "0"),
+                provider("wise", "Wise", "moneyTransferProvider", "94.50", "2")
+        ));
+        RateAggregator aggregator = aggregatorWith(client);
+        aggregator.quote("USD", "INR", new BigDecimal("1000"));
+
+        assertThat(aggregator.knownProviderNames()).containsExactlyInAnyOrder("Remitly", "Wise");
+    }
+
+    @Test
+    void baselineFallsBackToWorstReceiveWhenNoBank() {
+        StubClient client = new StubClient();
+        client.next = new WiseComparisonResponse(List.of(
+                provider("wise", "Wise", "moneyTransferProvider", "94.50", "2"),
+                provider("remitly", "Remitly", "moneyTransferProvider", "94.30", "0")
+        ));
+        RateAggregator aggregator = aggregatorWith(client);
+
+        QuoteResponse response = aggregator.quote("USD", "INR", new BigDecimal("1000"));
+
+        // Without a bank in the result, the worst-received provider becomes the baseline.
+        assertThat(response.baselineName()).isEqualTo("Remitly");
     }
 }

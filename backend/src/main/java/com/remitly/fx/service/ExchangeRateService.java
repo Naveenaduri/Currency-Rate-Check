@@ -1,54 +1,50 @@
 package com.remitly.fx.service;
 
-import com.remitly.fx.model.RateComparison;
-import com.remitly.fx.model.RateQuote;
+import com.remitly.fx.model.QuoteResponse;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
- * Application-facing API. Thin delegate over {@link RateAggregator} that
- * translates "missing pair" into the {@link RateNotFoundException} the web
- * layer maps to a 404.
+ * Application-facing facade over {@link RateAggregator}. Owns the small bits
+ * of static config the UI needs (the supported currency picker list).
  */
 @Service
 public class ExchangeRateService {
 
     private final RateAggregator aggregator;
+    private final List<String> supportedCurrencies;
 
-    public ExchangeRateService(RateAggregator aggregator) {
+    public ExchangeRateService(
+            RateAggregator aggregator,
+            @Value("${fx.currencies.supported:USD,EUR,GBP,JPY,INR,MXN,PHP,AUD,CAD,SGD,CHF}")
+            String[] supportedCurrencies) {
         this.aggregator = aggregator;
+        this.supportedCurrencies = Arrays.stream(supportedCurrencies)
+                .map(String::trim)
+                .map(String::toUpperCase)
+                .distinct()
+                .toList();
     }
 
     public Set<String> listCurrencies() {
-        return aggregator.listCurrencies();
+        return new TreeSet<>(supportedCurrencies);
     }
 
-    public List<String> listProviders() {
-        return aggregator.providerNames();
+    public Set<String> listProviders() {
+        return aggregator.knownProviderNames();
     }
 
-    public RateQuote getBestRate(String from, String to) {
-        return aggregator.bestRate(from, to)
-                .orElseThrow(() -> new RateNotFoundException(
-                        "No provider quotes a direct rate for " + from + " -> " + to));
+    public QuoteResponse quote(String from, String to, BigDecimal sendAmount) {
+        return aggregator.quote(from, to, sendAmount);
     }
 
-    public RateComparison compare(String from, String to) {
-        RateComparison comparison = aggregator.compare(from, to);
-        if (comparison.quotes().isEmpty()) {
-            throw new RateNotFoundException(
-                    "No provider quotes a direct rate for " + from + " -> " + to);
-        }
-        return comparison;
-    }
-
-    public List<RateQuote> listBestRates() {
-        return aggregator.allBestRates();
-    }
-
-    public void refreshNow() {
-        aggregator.refresh();
+    public void refresh(String from, String to) {
+        aggregator.invalidate(from, to);
     }
 }

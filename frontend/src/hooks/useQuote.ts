@@ -1,39 +1,43 @@
 import { useEffect, useState } from "react";
-import { ApiError, getQuotes, type RateComparison } from "../api/client";
+import { ApiError, getQuote, type QuoteResponse } from "../api/client";
 
-export interface UseRateResult {
-  comparison: RateComparison | null;
+export interface UseQuoteResult {
+  quote: QuoteResponse | null;
   loading: boolean;
   error: string | null;
 }
 
-const DEBOUNCE_MS = 250;
+const DEBOUNCE_MS = 300;
 
-/**
- * Fetches the multi-provider quote comparison for {@code from -> to} whenever
- * either side changes. Returns the full comparison so the UI can show both the
- * best-rate banner and the per-provider breakdown.
- */
-export function useRate(
+export function useQuote(
   from: string | null,
   to: string | null,
+  amount: number,
   refreshKey = 0,
-): UseRateResult {
-  const [comparison, setComparison] = useState<RateComparison | null>(null);
+): UseQuoteResult {
+  const [quote, setQuote] = useState<QuoteResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!from || !to) {
-      setComparison(null);
+    if (!from || !to || !Number.isFinite(amount) || amount <= 0) {
+      setQuote(null);
       setLoading(false);
       setError(null);
       return;
     }
 
     if (from === to) {
-      const identity = { provider: "—", rate: 1 };
-      setComparison({ from, to, best: identity, quotes: [identity] });
+      setQuote({
+        from,
+        to,
+        sendAmount: amount,
+        bestReceiveAmount: amount,
+        baselineName: "Same currency",
+        lastRefreshAt: null,
+        source: "n/a",
+        providers: [],
+      });
       setLoading(false);
       setError(null);
       return;
@@ -44,9 +48,9 @@ export function useRate(
     setError(null);
 
     const handle = setTimeout(() => {
-      getQuotes(from, to, controller.signal)
+      getQuote(from, to, amount, controller.signal)
         .then((result) => {
-          setComparison(result);
+          setQuote(result);
           setLoading(false);
         })
         .catch((err: unknown) => {
@@ -54,9 +58,9 @@ export function useRate(
           if (err instanceof ApiError && err.status === 404) {
             setError("No provider quotes a direct rate for this pair");
           } else {
-            setError(err instanceof Error ? err.message : "Failed to load rate");
+            setError(err instanceof Error ? err.message : "Failed to load quote");
           }
-          setComparison(null);
+          setQuote(null);
           setLoading(false);
         });
     }, DEBOUNCE_MS);
@@ -65,7 +69,7 @@ export function useRate(
       clearTimeout(handle);
       controller.abort();
     };
-  }, [from, to, refreshKey]);
+  }, [from, to, amount, refreshKey]);
 
-  return { comparison, loading, error };
+  return { quote, loading, error };
 }

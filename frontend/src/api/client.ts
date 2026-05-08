@@ -1,20 +1,29 @@
-export interface RateQuote {
-  from: string;
-  to: string;
-  rate: number;
-  provider: string;
-}
-
 export interface ProviderQuote {
-  provider: string;
+  id: string;
+  name: string;
+  logoUrl: string | null;
+  type: string | null;
   rate: number;
+  fee: number;
+  markup: number | null;
+  receiveAmount: number;
+  savingsVsBaseline: number;
+  deliveryDuration: number | null;
+  deliveryDurationType: string | null;
+  dateCollected: string | null;
+  bestDeal: boolean;
+  baseline: boolean;
 }
 
-export interface RateComparison {
+export interface QuoteResponse {
   from: string;
   to: string;
-  best: ProviderQuote | null;
-  quotes: ProviderQuote[];
+  sendAmount: number;
+  bestReceiveAmount: number;
+  baselineName: string;
+  lastRefreshAt: string | null;
+  source: string;
+  providers: ProviderQuote[];
 }
 
 export class ApiError extends Error {
@@ -62,36 +71,31 @@ export function getCurrencies(signal?: AbortSignal): Promise<string[]> {
   return request<string[]>("/api/currencies", { signal });
 }
 
-export function getProviders(signal?: AbortSignal): Promise<string[]> {
-  return request<string[]>("/api/providers", { signal });
-}
-
-export function getRates(signal?: AbortSignal): Promise<RateQuote[]> {
-  return request<RateQuote[]>("/api/rates", { signal });
-}
-
-export function getBestRate(
+export function getQuote(
   from: string,
   to: string,
+  amount: number,
   signal?: AbortSignal,
-): Promise<RateQuote> {
-  return request<RateQuote>(
-    `/api/rates/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
-    { signal },
-  );
+): Promise<QuoteResponse> {
+  const query = new URLSearchParams({
+    from,
+    to,
+    amount: String(amount),
+  });
+  return request<QuoteResponse>(`/api/quotes?${query.toString()}`, { signal });
 }
 
-export function getQuotes(
+export function refreshQuote(
   from: string,
   to: string,
-  signal?: AbortSignal,
-): Promise<RateComparison> {
-  return request<RateComparison>(
-    `/api/rates/${encodeURIComponent(from)}/${encodeURIComponent(to)}/quotes`,
-    { signal },
-  );
-}
-
-export function refreshRates(): Promise<RateQuote[]> {
-  return request<RateQuote[]>("/api/rates/refresh", { method: "POST" });
+  amount: number,
+): Promise<QuoteResponse> {
+  const query = new URLSearchParams({
+    from,
+    to,
+    amount: String(amount),
+  });
+  return request<QuoteResponse>(`/api/quotes/refresh?${query.toString()}`, {
+    method: "POST",
+  });
 }
